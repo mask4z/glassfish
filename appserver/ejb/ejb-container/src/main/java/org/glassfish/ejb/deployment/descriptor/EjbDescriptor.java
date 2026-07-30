@@ -40,10 +40,12 @@ import com.sun.enterprise.util.LocalStringManagerImpl;
 
 import jakarta.ejb.EJBLocalObject;
 import jakarta.ejb.EJBObject;
+import jakarta.ejb.TransactionAttribute;
 import jakarta.inject.Inject;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Hashtable;
@@ -665,11 +667,51 @@ public abstract class EjbDescriptor extends EjbBeanDescriptor {
         if (containerTransaction != null) {
             return containerTransaction;
         }
+        // The exact lookup above only matches a descriptor built with the same method-intf
+        // style the annotation was bound to. @Schedule timeout methods are resolved through a
+        // TIMER_METHOD descriptor but are never added to getTxBusinessMethodDescriptors(), so
+        // their @TransactionAttribute is never bound and they silently fall back to REQUIRED.
+        // Match on signature regardless of style, then read the annotation directly for
+        // methods that are not business methods at all (private @Schedule methods).
+        for (MethodDescriptor other : getMethodContainerTransactions().keySet()) {
+            if (methodDescriptor.getName().equals(other.getName())
+                && Arrays.equals(methodDescriptor.getParameterClassNames(), other.getParameterClassNames())) {
+                containerTransaction = getMethodContainerTransactions().get(other);
+                break;
+            }
+        }
+        if (containerTransaction != null) {
+            return containerTransaction;
+        }
+        Method annotatedMethod = methodDescriptor.getDeclaredMethod(this);
+        if (annotatedMethod != null) {
+            TransactionAttribute annotation = annotatedMethod.getAnnotation(TransactionAttribute.class);
+            if (annotation != null) {
+                String attribute = toDescriptorTransactionAttribute(annotation);
+                if (attribute != null) {
+                    containerTransaction = new ContainerTransaction(attribute, "");
+                    getMethodContainerTransactions().put(methodDescriptor, containerTransaction);
+                    return containerTransaction;
+                }
+            }
+        }
         if (Descriptor.isBoundsChecking() && usesDefaultTransaction) {
             containerTransaction = new ContainerTransaction(ContainerTransaction.REQUIRED, "");
             getMethodContainerTransactions().put(methodDescriptor, containerTransaction);
         }
         return containerTransaction;
+    }
+
+    private static String toDescriptorTransactionAttribute(TransactionAttribute annotation) {
+        switch (annotation.value()) {
+            case MANDATORY:     return ContainerTransaction.MANDATORY;
+            case NEVER:         return ContainerTransaction.NEVER;
+            case NOT_SUPPORTED: return ContainerTransaction.NOT_SUPPORTED;
+            case REQUIRED:      return ContainerTransaction.REQUIRED;
+            case REQUIRES_NEW:  return ContainerTransaction.REQUIRES_NEW;
+            case SUPPORTS:      return ContainerTransaction.SUPPORTS;
+            default:            return null;
+        }
     }
 
     private boolean needToConvertMethodContainerTransactions() {
